@@ -1,136 +1,203 @@
+
 name: RSS to Nerimity
+
 on:
   schedule:
-    - cron: '*/15 * * * *' # Runs every 15 minutes
-  workflow_dispatch: # Allows manual trigger
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rss-to-nerimity
+  cancel-in-progress: false
 
 jobs:
   poll-rss:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: "3.12"
 
-      - name: Send test webhook
+      - name: Fetch feeds and send updates
+        id: rss
         env:
           NERIMITY_WEBHOOK: ${{ secrets.NERIMITY_WEBHOOK }}
         run: |
-          python -c "
-          import urllib.request
+          python - <<'PY'
           import json
           import os
-          
-          webhook_url = os.environ.get('NERIMITY_WEBHOOK')
-          
-          payload = {
-              'content': '🚀 **System Check:** The GitHub Action connection to Nerimity is fully functional!',
-              'username': 'System Test Bot'
-          }
-          
-          req = urllib.request.Request(
-              webhook_url, 
-              data=json.dumps(payload).encode('utf-8'),
-              headers={'Content-Type': 'application/json'},
-              method='POST'
-          )
-          
-          try:
-              urllib.request.urlopen(req)
-              print('Success! Check your Nerimity channel.')
-          except Exception as e:
-              print(f'Failed to push: {e}')
-          "
+          import time
+          import urllib.error
+          import urllib.request
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
 
-      - name: Fetch and Push RSS
-        env:
-          NERIMITY_WEBHOOK: ${{ secrets.NERIMITY_WEBHOOK }}
-        run: |
-          python -c "
-          import urllib.request, json, os, xml.etree.ElementTree as ET
-          
-          # ---- CONFIGURATION ----
           FEEDS = {
-              'osugame': 'https://keep.md/api/x-rss/osugame.xml?content=posts',
-              'osu_SOTD': 'https://keep.md/api/x-rss/osu_SOTD.xml?content=posts',
-              'osugame': 'https://reddit.com'
+              "x_osugame": {
+                  "url": "https://keep.md/api/x-rss/osugame.xml?content=posts",
+                  "label": "@osugame on X",
+              },
+              "x_osu_SOTD": {
+                  "url": "https://keep.md/api/x-rss/osu_SOTD.xml?content=posts",
+                  "label": "@osu_SOTD on X",
+              },
+              "reddit_osugame": {
+                  "url": "https://www.reddit.com/r/osugame/new/.rss",
+                  "label": "r/osugame",
+              },
           }
-          # -----------------------
 
-          HISTORY_FILE = 'last_seen.json'
-          webhook_url = os.environ.get('NERIMITY_WEBHOOK')
-          
-          if os.path.exists(HISTORY_FILE):
-              with open(HISTORY_FILE, 'r') as f:
-                  try: history = json.load(f)
-                  except: history = {}
+          HISTORY_FILE = Path("last_seen.json")
+          WEBHOOK = os.environ.get("NERIMITY_WEBHOOK")
+
+          if not WEBHOOK:
+              raise SystemExit("NERIMITY_WEBHOOK secret is missing")
+
+          if HISTORY_FILE.exists():
+              history = json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
           else:
               history = {}
 
-          has_updates = False
+          def request(url, payload=None):
+              headers = {
+                  "User-Agent": "OsuFeedGrabberBot/1.0 (GitHub Actions RSS reader)",
+                  "Accept": "application/rss+xml, application/atom+xml, application/xml",
+              }
 
-          for source_name, feed_url in FEEDS.items():
+              if payload is not None:
+                  headers["Content-Type"] = "application/json; charset=utf-8"
+
+              req = urllib.request.Request(
+                  url,
+                  data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+                  headers=headers,
+                  method="POST" if payload is not None else "GET",
+              )
+
+              for attempt in range(3):
+                  try:
+                      with urllib.request.urlopen(req, timeout=20) as response:
+                          return response.read()
+                  except urllib.error.HTTPError as exc:
+                      if exc.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                          raise
+                      print(f"HTTP {exc.code}; retrying...")
+                  except (urllib.error.URLError, TimeoutError):
+                      if attempt == 2:
+                          raise
+                      print("Connection failed; retrying...")
+
+                  time.sleep(2 ** (attempt + 1))
+
+          def parse_latest(xml_data):
+              root = ET.fromstring(xml_data)
+              atom_ns = "{http://www.w3.org/2005/Atom}"
+
+              if root.tag == atom_ns + "feed":
+                  entry = root.find(atom_ns + "entry")
+                  if entry is None:
+                      return None
+
+                  title = entry.findtext(atom_ns + "title", default="New post")
+                  guid = entry.findtext(atom_ns + "id")
+                  link = ""
+
+                  for element in entry.findall(atom_ns + "link"):
+                      if element.get("rel", "alternate") == "alternate":
+                          link = element.get("href", "")
+                          break
+
+              else:
+                  entry = root.find("./channel/item")
+                  if entry is None:
+                      return None
+
+                  title = entry.findtext("title", default="New post")
+                  link = entry.findtext("link", default="")
+                  guid = entry.findtext("guid") or link
+
+              if not guid:
+                  raise ValueError("Feed item has no ID or link")
+
+              return guid, title, link
+
+          failures = []
+
+          for name, feed in FEEDS.items():
+              print(f"\nChecking {name}...")
+
               try:
-                  # Honest, unique bot header structure to comply with Reddit automated script rules
-                  req = urllib.request.Request(feed_url)
-                  req.add_header('User-Agent', f'OsuFeedGrabberBot/1.0 (contact: github-automation-runner; source={source_name})')
-                  req.add_header('Accept', 'application/atom+xml,application/rss+xml,text/xml;q=0.9,*/*;q=0.8')
-                  req.add_header('Accept-Language', 'en-US,en;q=0.5')
-                  
-                  with urllib.request.urlopen(req, timeout=15) as response:
-                      xml_data = response.read()
-                  
-                  root = ET.fromstring(xml_data)
-                  is_atom = 'xml' in root.tag or 'feed' in root.tag
-                  
-                  if is_atom:
-                      ns = {'atom': 'http://w3.org'}
-                      entries = root.findall('atom:entry', ns)
-                      if not entries: continue
-                      latest_item = entries[0]
-                      title = latest_item.find('atom:title', ns).text
-                      link_elem = latest_item.find('atom:link', ns)
-                      link = link_elem.attrib.get('href', '') if link_elem is not None else ''
-                      guid = latest_item.find('atom:id', ns).text
-                      msg_template = f'**New post in r/{source_name}:**\n{title}\n\n{link}'
-                  else:
-                      items = root.findall('.//item')
-                      if not items: continue
-                      latest_item = items[0]
-                      title = latest_item.find('title').text if latest_item.find('title') is not None else 'New Post'
-                      link = latest_item.find('link').text if latest_item.find('link') is not None else ''
-                      guid = latest_item.find('guid').text if latest_item.find('guid') is not None else link
-                      msg_template = f'**{source_name} posted on X:**\n{title}\n\n{link}'
-                  
-                  if history.get(source_name) != guid:
-                      history[source_name] = guid
-                      has_updates = True
-                      
-                      payload = {'content': msg_template, 'username': 'Community Feed Bot'}
-                      req_webhook = urllib.request.Request(
-                          webhook_url, 
-                          data=json.dumps(payload).encode('utf-8'),
-                          headers={'Content-Type': 'application/json'},
-                          method='POST'
-                      )
-                      urllib.request.urlopen(req_webhook)
-                      print(f'Successfully pushed update for {source_name}')
-              except Exception as e:
-                  print(f'Error processing {source_name}: {e}')
+                  xml_data = request(feed["url"])
+                  item = parse_latest(xml_data)
 
-          if has_updates:
-              with open(HISTORY_FILE, 'w') as f:
-                  json.dump(history, f)
-          "
+                  if item is None:
+                      print("Feed contains no posts")
+                      continue
 
-      - name: Commit and Push History Change
+                  guid, title, link = item
+
+                  if history.get(name) == guid:
+                      print("No new post")
+                      continue
+
+                  message = (
+                      f"**New post from {feed['label']}**\n"
+                      f"{title}\n\n{link}"
+                  )
+
+                  request(WEBHOOK, {
+                      "content": message,
+                      "username": "Community Feed Bot",
+                  })
+
+                  # Only save the ID after successful delivery.
+                  history[name] = guid
+                  HISTORY_FILE.write_text(
+                      json.dumps(history, indent=2, ensure_ascii=False) + "\n",
+                      encoding="utf-8",
+                  )
+
+                  print(f"Successfully delivered {name}")
+
+              except Exception as exc:
+                  print(f"ERROR: {name}: {type(exc).__name__}: {exc}")
+                  failures.append(name)
+
+          if failures:
+              raise SystemExit(
+                  "Failed feeds: " + ", ".join(failures)
+              )
+
+          print("\nAll feeds checked successfully")
+          PY
+
+      - name: Commit tracking history
+        if: always()
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add last_seen.json || true
-          git commit -m "Update RSS tracking history [skip ci]" || true
-          git push || true
+          if [ ! -f last_seen.json ]; then
+            echo "No history file to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add last_seen.json
+
+          if git diff --cached --quiet; then
+            echo "No history changes."
+            exit 0
+          fi
+
+          git commit -m "Update RSS tracking history [skip ci]"
+          git push
