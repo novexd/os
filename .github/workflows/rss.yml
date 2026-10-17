@@ -44,18 +44,25 @@ jobs:
 
           FEEDS = {
               "x_osugame": {
-                  "url": "https://keep.md/api/x-rss/osugame.xml?content=posts",
+                  "url": "https://rsshub.app/twitter/user/osugame",
                   "label": "@osugame on X",
+                  "username": "osu! News",
+                  "avatar_url": "https://pbs.twimg.com/profile_images/706741102120800256/xOf4lxBy_400x400.jpg",
               },
               "x_osu_SOTD": {
-                  "url": "https://keep.md/api/x-rss/osu_SOTD.xml?content=posts",
+                  "url": "https://rsshub.app/twitter/user/osu_SOTD",
                   "label": "@osu_SOTD on X",
+                  "username": "osu! SOTD",
+                  "avatar_url": "https://pbs.twimg.com/profile_images/1278305103963963393/Y6qHo5ZT_400x400.png",
               },
               "reddit_osugame": {
                   "url": "https://www.reddit.com/r/osugame/new/.rss",
                   "label": "r/osugame",
+                  "username": "r/osugame",
+                  "avatar_url": "https://i.redd.it/n13pg82qpjd41.png",
               },
           }
+
 
           HISTORY_FILE = Path("last_seen.json")
           WEBHOOK = os.environ.get("NERIMITY_WEBHOOK")
@@ -156,9 +163,10 @@ jobs:
                   )
 
                   request(WEBHOOK, {
-                      "content": message,
-                      "username": "Community Feed Bot",
-                  })
+                    "content": message,
+                    "username": feed["username"],
+                    "avatar_url": feed["avatar_url"],
+                })
 
                   # Only save the ID after successful delivery.
                   history[name] = guid
