@@ -2,7 +2,7 @@ name: RSS to Nerimity
 on:
   schedule:
     - cron: '*/15 * * * *' # Runs every 15 minutes
-  workflow_dispatch: # Allows you to manually trigger it via GitHub UI to test
+  workflow_dispatch: # Allows manual trigger
 
 jobs:
   poll-rss:
@@ -16,6 +16,36 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Send test webhook
+        env:
+          NERIMITY_WEBHOOK: ${{ secrets.NERIMITY_WEBHOOK }}
+        run: |
+          python -c "
+          import urllib.request
+          import json
+          import os
+          
+          webhook_url = os.environ.get('NERIMITY_WEBHOOK')
+          
+          payload = {
+              'content': '🚀 **System Check:** The GitHub Action connection to Nerimity is fully functional!',
+              'username': 'System Test Bot'
+          }
+          
+          req = urllib.request.Request(
+              webhook_url, 
+              data=json.dumps(payload).encode('utf-8'),
+              headers={'Content-Type': 'application/json'},
+              method='POST'
+          )
+          
+          try:
+              urllib.request.urlopen(req)
+              print('Success! Check your Nerimity channel.')
+          except Exception as e:
+              print(f'Failed to push: {e}')
+          "
+
       - name: Fetch and Push RSS
         env:
           NERIMITY_WEBHOOK: ${{ secrets.NERIMITY_WEBHOOK }}
@@ -24,10 +54,11 @@ jobs:
           import urllib.request, json, os, xml.etree.ElementTree as ET
           
           # ---- CONFIGURATION ----
-          # Replace these with your free Keep.md or FeedSpot RSS URLs
+          # Simply add your URLs here. Reddit uses Atom format namespace, which the script handles.
           FEEDS = {
               'osugame': 'https://keep.md/api/x-rss/osugame.xml?content=posts',
               'osu_SOTD': 'https://keep.md/api/x-rss/osu_SOTD.xml?content=posts'
+              'r/osugame': 'https://reddit.com'
           }
           # -----------------------
 
@@ -46,36 +77,55 @@ jobs:
 
           has_updates = False
 
-          for account_name, feed_url in FEEDS.items():
+          # Generic user agent to avoid getting blocked by Reddit/X filters
+          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS-Bot/1.0'}
+
+          for source_name, feed_url in FEEDS.items():
               try:
-                  req = urllib.request.Request(feed_url, headers={'User-Agent': 'Mozilla/5.0'})
+                  req = urllib.request.Request(feed_url, headers=headers)
                   with urllib.request.urlopen(req) as response:
                       xml_data = response.read()
                   
                   root = ET.fromstring(xml_data)
-                  items = root.findall('.//item')
                   
-                  if not items:
-                      continue
-                      
-                  # Look at the latest post in the feed
-                  latest_item = items[0]
-                  title = latest_item.find('title').text if latest_item.find('title') is not None else 'New Post'
-                  link = latest_item.find('link').text if latest_item.find('link') is not None else ''
-                  guid = latest_item.find('guid').text if latest_item.find('guid') is not None else link
+                  # Handle standard RSS format (X converters) and Atom format (Reddit)
+                  is_atom = 'xml' in root.tag or 'feed' in root.tag
                   
-                  # Check if this post is brand new
-                  if history.get(account_name) != guid:
-                      history[account_name] = guid
+                  if is_atom:
+                      # Reddit format uses namespaces
+                      ns = {'atom': 'http://w3.org'}
+                      entries = root.findall('atom:entry', ns)
+                      if not entries:
+                          continue
+                      latest_item = entries[0]
+                      title = latest_item.find('atom:title', ns).text
+                      # Reddit links are inside link element attributes
+                      link_elem = latest_item.find('atom:link', ns)
+                      link = link_elem.attrib.get('href', '') if link_elem is not None else ''
+                      guid = latest_item.find('atom:id', ns).text
+                      msg_template = f'**New post in {source_name}:**\n{title}\n\n{link}'
+                  else:
+                      # Standard RSS format
+                      items = root.findall('.//item')
+                      if not items:
+                          continue
+                      latest_item = items[0]
+                      title = latest_item.find('title').text if latest_item.find('title') is not None else 'New Post'
+                      link = latest_item.find('link').text if latest_item.find('link') is not None else ''
+                      guid = latest_item.find('guid').text if latest_item.find('guid') is not None else link
+                      msg_template = f'**{source_name} posted on X:**\n{title}\n\n{link}'
+                  
+                  # Check if this item is new
+                  if history.get(source_name) != guid:
+                      history[source_name] = guid
                       has_updates = True
                       
-                      # Build payload for Nerimity
                       payload = {
-                          'content': f'**{account_name} posted on X:**\n{title}\n\n{link}',
-                          'username': 'X Feed Bot'
+                          'content': msg_template,
+                          'username': 'Community Feed Bot'
                       }
                       
-                      # Send to Nerimity
+                      # Send payload to Nerimity
                       req_webhook = urllib.request.Request(
                           webhook_url, 
                           data=json.dumps(payload).encode('utf-8'),
@@ -83,9 +133,9 @@ jobs:
                           method='POST'
                       )
                       urllib.request.urlopen(req_webhook)
-                      print(f'Successfully pushed update for {account_name}')
+                      print(f'Successfully pushed update for {source_name}')
               except Exception as e:
-                  print(f'Error processing {account_name}: {e}')
+                  print(f'Error processing {source_name}: {e}')
 
           # Save history back to disk if anything changed
           if has_updates:
