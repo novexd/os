@@ -163,9 +163,9 @@ jobs:
                   )
 
                   request(WEBHOOK, {
-                    "content": message,
+                    "content": f"[r:1829648046925979648] {message}",
                     "username": feed["username"],
-                    "avatar_url": feed["avatar_url"],
+                    "avatarUrl": feed["avatar_url"],
                     "silent": name == "reddit_osugame",
                 })
 
