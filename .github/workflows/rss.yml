@@ -1,0 +1,43 @@
+name: RSS to Nerimity
+on:
+  schedule:
+    - cron: '*/15 * * * *' # Runs every 15 minutes
+
+jobs:
+  poll-rss:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run RSS Fetch and Push
+        run: |
+          python -c "
+          import urllib.request, json, xml.etree.ElementTree as ET
+          
+          # 1. Fetch the RSS feed
+          feed_url = 'https://keep.md/api/x-rss/osugame.xml?content=posts'
+          req = urllib.request.Request(feed_url, headers={'User-Agent': 'Mozilla/5.0'})
+          with urllib.request.urlopen(req) as response:
+              xml_data = response.read()
+          
+          # 2. Parse the latest item (Simplistic example)
+          root = ET.fromstring(xml_data)
+          item = root.find('.//item')
+          if item is not None:
+              title = item.find('title').text
+              link = item.find('link').text
+              
+              # 3. Format payload for Nerimity
+              payload = {
+                  'content': f'**New Post:** {title}\n{link}',
+                  'username': 'X RSS Bot'
+              }
+              
+              # 4. Push to Nerimity via POST
+              webhook_url = '${{ secrets.NERIMITY_WEBHOOK }}'
+              req_webhook = urllib.request.Request(
+                  webhook_url, 
+                  data=json.dumps(payload).encode('utf-8'),
+                  headers={'Content-Type': 'application/json'},
+                  method='POST'
+              )
+              urllib.request.urlopen(req_webhook)
+          "
