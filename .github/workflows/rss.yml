@@ -3,7 +3,7 @@ name: RSS to Nerimity
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -166,6 +166,7 @@ jobs:
                     "content": message,
                     "username": feed["username"],
                     "avatar_url": feed["avatar_url"],
+                    "silent": name == "reddit_osugame",
                 })
 
                   # Only save the ID after successful delivery.
