@@ -2,42 +2,101 @@ name: RSS to Nerimity
 on:
   schedule:
     - cron: '*/15 * * * *' # Runs every 15 minutes
+  workflow_dispatch: # Allows you to manually trigger it via GitHub UI to test
 
 jobs:
   poll-rss:
     runs-on: ubuntu-latest
     steps:
-      - name: Run RSS Fetch and Push
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Fetch and Push RSS
+        env:
+          NERIMITY_WEBHOOK: ${{ secrets.NERIMITY_WEBHOOK }}
         run: |
           python -c "
-          import urllib.request, json, xml.etree.ElementTree as ET
+          import urllib.request, json, os, xml.etree.ElementTree as ET
           
-          # 1. Fetch the RSS feed
-          feed_url = 'https://keep.md/api/x-rss/osugame.xml?content=posts'
-          req = urllib.request.Request(feed_url, headers={'User-Agent': 'Mozilla/5.0'})
-          with urllib.request.urlopen(req) as response:
-              xml_data = response.read()
+          # ---- CONFIGURATION ----
+          # Replace these with your free Keep.md or FeedSpot RSS URLs
+          FEEDS = {
+              'osugame': 'https://keep.md/api/x-rss/osugame.xml?content=posts',
+              'osu_SOTD': 'https://keep.md/api/x-rss/osu_SOTD.xml?content=posts'
+          }
+          # -----------------------
+
+          HISTORY_FILE = 'last_seen.json'
+          webhook_url = os.environ.get('NERIMITY_WEBHOOK')
           
-          # 2. Parse the latest item (Simplistic example)
-          root = ET.fromstring(xml_data)
-          item = root.find('.//item')
-          if item is not None:
-              title = item.find('title').text
-              link = item.find('link').text
-              
-              # 3. Format payload for Nerimity
-              payload = {
-                  'content': f'**New Post:** {title}\n{link}',
-                  'username': 'X RSS Bot'
-              }
-              
-              # 4. Push to Nerimity via POST
-              webhook_url = '${{ secrets.NERIMITY_WEBHOOK }}'
-              req_webhook = urllib.request.Request(
-                  webhook_url, 
-                  data=json.dumps(payload).encode('utf-8'),
-                  headers={'Content-Type': 'application/json'},
-                  method='POST'
-              )
-              urllib.request.urlopen(req_webhook)
+          # Load previously seen posts
+          if os.path.exists(HISTORY_FILE):
+              with open(HISTORY_FILE, 'r') as f:
+                  try:
+                      history = json.load(f)
+                  except:
+                      history = {}
+          else:
+              history = {}
+
+          has_updates = False
+
+          for account_name, feed_url in FEEDS.items():
+              try:
+                  req = urllib.request.Request(feed_url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req) as response:
+                      xml_data = response.read()
+                  
+                  root = ET.fromstring(xml_data)
+                  items = root.findall('.//item')
+                  
+                  if not items:
+                      continue
+                      
+                  # Look at the latest post in the feed
+                  latest_item = items[0]
+                  title = latest_item.find('title').text if latest_item.find('title') is not None else 'New Post'
+                  link = latest_item.find('link').text if latest_item.find('link') is not None else ''
+                  guid = latest_item.find('guid').text if latest_item.find('guid') is not None else link
+                  
+                  # Check if this post is brand new
+                  if history.get(account_name) != guid:
+                      history[account_name] = guid
+                      has_updates = True
+                      
+                      # Build payload for Nerimity
+                      payload = {
+                          'content': f'**{account_name} posted on X:**\n{title}\n\n{link}',
+                          'username': 'X Feed Bot'
+                      }
+                      
+                      # Send to Nerimity
+                      req_webhook = urllib.request.Request(
+                          webhook_url, 
+                          data=json.dumps(payload).encode('utf-8'),
+                          headers={'Content-Type': 'application/json'},
+                          method='POST'
+                      )
+                      urllib.request.urlopen(req_webhook)
+                      print(f'Successfully pushed update for {account_name}')
+              except Exception as e:
+                  print(f'Error processing {account_name}: {e}')
+
+          # Save history back to disk if anything changed
+          if has_updates:
+              with open(HISTORY_FILE, 'w') as f:
+                  json.dump(history, f)
           "
+
+      - name: Commit and Push History Change
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@://github.com"
+          git add last_seen.json || true
+          git commit -m "Update RSS tracking history [skip ci]" || true
+          git push || true
