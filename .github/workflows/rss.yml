@@ -54,78 +54,63 @@ jobs:
           import urllib.request, json, os, xml.etree.ElementTree as ET
           
           # ---- CONFIGURATION ----
-          # Simply add your URLs here. Reddit uses Atom format namespace, which the script handles.
           FEEDS = {
               'osugame': 'https://keep.md/api/x-rss/osugame.xml?content=posts',
-              'osu_SOTD': 'https://keep.md/api/x-rss/osu_SOTD.xml?content=posts'
-              'r/osugame': 'https://reddit.com'
+              'osu_SOTD': 'https://keep.md/api/x-rss/osu_SOTD.xml?content=posts',
+              'osugame': 'https://reddit.com'
           }
           # -----------------------
 
           HISTORY_FILE = 'last_seen.json'
           webhook_url = os.environ.get('NERIMITY_WEBHOOK')
           
-          # Load previously seen posts
           if os.path.exists(HISTORY_FILE):
               with open(HISTORY_FILE, 'r') as f:
-                  try:
-                      history = json.load(f)
-                  except:
-                      history = {}
+                  try: history = json.load(f)
+                  except: history = {}
           else:
               history = {}
 
           has_updates = False
 
-          # Generic user agent to avoid getting blocked by Reddit/X filters
-          headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) RSS-Bot/1.0'}
-
           for source_name, feed_url in FEEDS.items():
               try:
-                  req = urllib.request.Request(feed_url, headers=headers)
-                  with urllib.request.urlopen(req) as response:
+                  # Honest, unique bot header structure to comply with Reddit automated script rules
+                  req = urllib.request.Request(feed_url)
+                  req.add_header('User-Agent', f'OsuFeedGrabberBot/1.0 (contact: github-automation-runner; source={source_name})')
+                  req.add_header('Accept', 'application/atom+xml,application/rss+xml,text/xml;q=0.9,*/*;q=0.8')
+                  req.add_header('Accept-Language', 'en-US,en;q=0.5')
+                  
+                  with urllib.request.urlopen(req, timeout=15) as response:
                       xml_data = response.read()
                   
                   root = ET.fromstring(xml_data)
-                  
-                  # Handle standard RSS format (X converters) and Atom format (Reddit)
                   is_atom = 'xml' in root.tag or 'feed' in root.tag
                   
                   if is_atom:
-                      # Reddit format uses namespaces
                       ns = {'atom': 'http://w3.org'}
                       entries = root.findall('atom:entry', ns)
-                      if not entries:
-                          continue
+                      if not entries: continue
                       latest_item = entries[0]
                       title = latest_item.find('atom:title', ns).text
-                      # Reddit links are inside link element attributes
                       link_elem = latest_item.find('atom:link', ns)
                       link = link_elem.attrib.get('href', '') if link_elem is not None else ''
                       guid = latest_item.find('atom:id', ns).text
-                      msg_template = f'**New post in {source_name}:**\n{title}\n\n{link}'
+                      msg_template = f'**New post in r/{source_name}:**\n{title}\n\n{link}'
                   else:
-                      # Standard RSS format
                       items = root.findall('.//item')
-                      if not items:
-                          continue
+                      if not items: continue
                       latest_item = items[0]
                       title = latest_item.find('title').text if latest_item.find('title') is not None else 'New Post'
                       link = latest_item.find('link').text if latest_item.find('link') is not None else ''
                       guid = latest_item.find('guid').text if latest_item.find('guid') is not None else link
                       msg_template = f'**{source_name} posted on X:**\n{title}\n\n{link}'
                   
-                  # Check if this item is new
                   if history.get(source_name) != guid:
                       history[source_name] = guid
                       has_updates = True
                       
-                      payload = {
-                          'content': msg_template,
-                          'username': 'Community Feed Bot'
-                      }
-                      
-                      # Send payload to Nerimity
+                      payload = {'content': msg_template, 'username': 'Community Feed Bot'}
                       req_webhook = urllib.request.Request(
                           webhook_url, 
                           data=json.dumps(payload).encode('utf-8'),
@@ -137,7 +122,6 @@ jobs:
               except Exception as e:
                   print(f'Error processing {source_name}: {e}')
 
-          # Save history back to disk if anything changed
           if has_updates:
               with open(HISTORY_FILE, 'w') as f:
                   json.dump(history, f)
@@ -146,7 +130,7 @@ jobs:
       - name: Commit and Push History Change
         run: |
           git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@://github.com"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add last_seen.json || true
           git commit -m "Update RSS tracking history [skip ci]" || true
           git push || true
