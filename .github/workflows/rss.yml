@@ -163,7 +163,7 @@ jobs:
                   )
 
                   request(WEBHOOK, {
-                    "content": f"[r:1829648046925979648] {message}",
+                    "content": f"[r:1829648046925979648] {message}" if name != 'reddit_osugame' else message,
                     "username": feed["username"],
                     "avatarUrl": feed["avatar_url"],
                     "silent": name == "reddit_osugame",
