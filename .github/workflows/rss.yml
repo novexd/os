@@ -247,6 +247,39 @@ jobs:
           print("\nAll feeds checked successfully")
           PY
 
+      - name: Diagnose Reddit Atom metadata (no webhook posts)
+        if: ${{ always() }}
+        run: |
+          python - <<'PY'
+          import urllib.request
+          import urllib.error
+          import xml.etree.ElementTree as ET
+
+          url = "https://www.reddit.com/r/osugame/new/.rss?limit=100"
+          req = urllib.request.Request(url, headers={
+              "User-Agent": "OsuFeedGrabberBot/1.0 (RSS metadata diagnostic)",
+              "Accept": "application/atom+xml, application/xml",
+          })
+          try:
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  print("HTTP status:", response.status)
+                  data = response.read()
+              root = ET.fromstring(data)
+              atom = "{http://www.w3.org/2005/Atom}"
+              entries = root.findall(atom + "entry")
+              print("Atom entries:", len(entries))
+              for entry in entries[:8]:
+                  title = entry.findtext(atom + "title", default="")
+                  guid = entry.findtext(atom + "id", default="")
+                  categories = [e.attrib for e in entry.findall(atom + "category")]
+                  print("Post:", guid, "| title:", title[:100], "| categories:", categories)
+              if entries:
+                  print("First entry child tags:", [e.tag for e in entries[0]])
+              print("NOTE: No Nerimity webhook calls in this diagnostic step.")
+          except (urllib.error.URLError, ET.ParseError, TimeoutError) as exc:
+              print("RSS diagnostic unavailable:", type(exc).__name__, str(exc))
+          PY
+
       - name: Commit tracking history
         if: always()
         run: |
