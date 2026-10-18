@@ -57,7 +57,7 @@ jobs:
                   "avatar_url": "https://pbs.twimg.com/profile_images/1278305103963963393/Y6qHo5ZT_400x400.png",
               },
               "reddit_osugame": {
-                  "url": "https://www.reddit.com/r/osugame/new.json?limit=100&raw_json=1",
+                  "url": "https://www.reddit.com/r/osugame/search.xml?q=flair%3A%22Gameplay%22&restrict_sr=1&sort=new&t=all",
                   "label": "r/osugame",
                   "username": "r/osugame",
                   "avatar_url": "https://i.redd.it/n13pg82qpjd41.png",
@@ -155,49 +155,63 @@ jobs:
               })
 
           def check_reddit(name, feed):
-              previous = history.get(name)
-              after = None
-              unseen = []
-              found_previous = False
+              # Reddit's native search feed filters by actual post flair.
+              # Its Atom entries generally do not expose flair metadata.
+              root = ET.fromstring(request(feed["url"]))
+              atom = "{http://www.w3.org/2005/Atom}"
+              if root.tag != atom + "feed":
+                  raise ValueError("Expected Reddit Atom search feed")
 
-              # Pagination covers up to 300 recent posts after delayed runs.
-              for _ in range(3):
-                  url = feed["url"] + ("&after=" + urllib.parse.quote(after) if after else "")
-                  data = json.loads(request(url))
-                  children = data["data"]["children"]
-                  if not children:
-                      break
+              posts = []
+              for entry in root.findall(atom + "entry"):
+                  guid = entry.findtext(atom + "id") or ""
+                  title = entry.findtext(atom + "title", default="New post")
+                  link = next((e.get("href", "") for e in entry.findall(atom + "link")
+                               if e.get("rel", "alternate") == "alternate"), "")
+                  if not guid or not link:
+                      continue
+                  posts.append((guid, title, link))
 
-                  for child in children:
-                      post = child["data"]
-                      if post["name"] == previous:
-                          found_previous = True
-                          break
-                      unseen.append(post)
-
-                  if found_previous:
-                      break
-                  after = data["data"].get("after")
-                  if not after:
-                      break
-
-              if not unseen:
-                  print("No new Reddit posts")
+              if not posts:
+                  print("No Gameplay posts in search feed")
                   return
-              if previous and not found_previous:
-                  print("WARNING: Previous Reddit ID not found; older posts may be missed")
 
-              sent = 0
-              for post in reversed(unseen):
-                  if (post.get("link_flair_text") or "").strip().casefold() == "gameplay":
-                      send_post(name, feed, post.get("title", "New post"),
-                                "https://www.reddit.com" + post["permalink"])
-                      sent += 1
-                  # Persist only after successfully sending any qualifying post.
-                  history[name] = post["name"]
+              def normalized_id(value):
+                  # Atom IDs are usually t3_...; handle full URLs too.
+                  import re
+                  match = re.search(r"(t3_[a-z0-9]+)", value or "", re.I)
+                  if match:
+                      return match.group(1).lower()
+                  match = re.search(r"/comments/([a-z0-9]+)", value or "", re.I)
+                  return "t3_" + match.group(1).lower() if match else value
+
+              previous = history.get(name)
+              previous_id = normalized_id(previous)
+              # First run with no checkpoint: seed without reposting old entries.
+              if not previous:
+                  history[name] = normalized_id(posts[0][0])
                   save_history()
+                  print("Initialized Gameplay checkpoint; no historical posts sent")
+                  return
 
-              print(f"Delivered {sent} Gameplay posts; skipped {len(unseen) - sent} others")
+              unseen = []
+              for post in posts:
+                  if normalized_id(post[0]) == previous_id:
+                      break
+                  unseen.append(post)
+              else:
+                  # The old checkpoint may refer to a non-Gameplay post, or be
+                  # outside the search feed. Seed safely to avoid a flood.
+                  history[name] = normalized_id(posts[0][0])
+                  save_history()
+                  print("Checkpoint not in Gameplay feed; reseeded without backfill")
+                  return
+
+              for guid, title, link in reversed(unseen):
+                  send_post(name, feed, title, link)
+                  history[name] = normalized_id(guid)
+                  save_history()
+              print(f"Delivered {len(unseen)} new Gameplay posts")
 
           failures = []
 
