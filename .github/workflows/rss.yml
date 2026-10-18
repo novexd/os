@@ -226,6 +226,7 @@ jobs:
               print(f"Delivered {sent} likely gameplay posts; skipped {len(unseen)-sent} others")
 
           failures = []
+          degraded_feeds = []
 
           for name, feed in FEEDS.items():
               print(f"\nChecking {name}...")
@@ -247,16 +248,31 @@ jobs:
                   save_history()
                   print(f"Successfully delivered {name}")
 
+              except urllib.error.HTTPError as exc:
+                  # A missing optional third-party feed must not invalidate
+                  # successful deliveries from the other sources.
+                  if name.startswith("x_") and exc.code in (404, 410):
+                      note = f"{name}: upstream X feed returned HTTP {exc.code}; no updates available"
+                      print(f"WARNING: {note}")
+                      print(f"::warning::{note}")
+                      degraded_feeds.append(name)
+                  else:
+                      print(f"ERROR: {name}: HTTP {exc.code}: {exc.reason}")
+                      failures.append(name)
               except Exception as exc:
                   print(f"ERROR: {name}: {type(exc).__name__}: {exc}")
                   failures.append(name)
 
+          if degraded_feeds:
+              print("\nUnavailable optional feeds: " + ", ".join(degraded_feeds))
+              with open(os.environ.get("GITHUB_STEP_SUMMARY", "/dev/null"), "a", encoding="utf-8") as summary:
+                  summary.write("### Feed warnings\n")
+                  for name in degraded_feeds:
+                      summary.write(f"- {name}: upstream feed returned 404/410; no X update was delivered.\n")
           if failures:
-              raise SystemExit(
-                  "Failed feeds: " + ", ".join(failures)
-              )
+              raise SystemExit("Failed feeds: " + ", ".join(failures))
 
-          print("\nAll feeds checked successfully")
+          print("\nFeed poll finished; successful sources processed (check warnings above).")
           PY
 
       - name: Commit tracking history
