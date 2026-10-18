@@ -11,6 +11,31 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+def load_local_env():
+    """Load local secrets without requiring python-dotenv or overriding panel variables."""
+    for path in (Path(__file__).resolve().parent / ".env.local", Path(__file__).resolve().parent / ".env"):
+        if not path.is_file():
+            continue
+        for raw in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+
+
+load_local_env()
+
 LOG = logging.getLogger("rss_worker")
 WEBHOOK = os.environ.get("NERIMITY_WEBHOOK", "")
 STATE = Path(os.environ.get("RSS_STATE_FILE", str(Path(__file__).with_name("last_seen.json"))))
