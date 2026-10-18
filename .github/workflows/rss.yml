@@ -39,6 +39,7 @@ jobs:
           import time
           import urllib.error
           import urllib.request
+          import urllib.parse
           import xml.etree.ElementTree as ET
           from pathlib import Path
 
@@ -56,7 +57,7 @@ jobs:
                   "avatar_url": "https://pbs.twimg.com/profile_images/1278305103963963393/Y6qHo5ZT_400x400.png",
               },
               "reddit_osugame": {
-                  "url": "https://www.reddit.com/r/osugame/new/.rss",
+                  "url": "https://www.reddit.com/r/osugame/new.json?limit=100&raw_json=1",
                   "label": "r/osugame",
                   "username": "r/osugame",
                   "avatar_url": "https://i.redd.it/n13pg82qpjd41.png",
@@ -78,7 +79,7 @@ jobs:
           def request(url, payload=None):
               headers = {
                   "User-Agent": "OsuFeedGrabberBot/1.0 (GitHub Actions RSS reader)",
-                  "Accept": "application/rss+xml, application/atom+xml, application/xml",
+                  "Accept": "application/json, application/rss+xml, application/atom+xml, application/xml",
               }
 
               if payload is not None:
@@ -138,44 +139,86 @@ jobs:
 
               return guid, title, link
 
+          def save_history():
+              HISTORY_FILE.write_text(
+                  json.dumps(history, indent=2, ensure_ascii=False) + "\n",
+                  encoding="utf-8",
+              )
+
+          def send_post(name, feed, title, link):
+              message = f"**New post from {feed['label']}**\n{title}\n\n{link}"
+              request(WEBHOOK, {
+                  "content": f"[r:1829648046925979648] {message}" if name != "reddit_osugame" else message,
+                  "username": feed["username"],
+                  "avatarUrl": feed["avatar_url"],
+                  "silent": name == "reddit_osugame",
+              })
+
+          def check_reddit(name, feed):
+              previous = history.get(name)
+              after = None
+              unseen = []
+              found_previous = False
+
+              # Pagination covers up to 300 recent posts after delayed runs.
+              for _ in range(3):
+                  url = feed["url"] + ("&after=" + urllib.parse.quote(after) if after else "")
+                  data = json.loads(request(url))
+                  children = data["data"]["children"]
+                  if not children:
+                      break
+
+                  for child in children:
+                      post = child["data"]
+                      if post["name"] == previous:
+                          found_previous = True
+                          break
+                      unseen.append(post)
+
+                  if found_previous:
+                      break
+                  after = data["data"].get("after")
+                  if not after:
+                      break
+
+              if not unseen:
+                  print("No new Reddit posts")
+                  return
+              if previous and not found_previous:
+                  print("WARNING: Previous Reddit ID not found; older posts may be missed")
+
+              sent = 0
+              for post in reversed(unseen):
+                  if (post.get("link_flair_text") or "").strip().casefold() == "gameplay":
+                      send_post(name, feed, post.get("title", "New post"),
+                                "https://www.reddit.com" + post["permalink"])
+                      sent += 1
+                  # Persist only after successfully sending any qualifying post.
+                  history[name] = post["name"]
+                  save_history()
+
+              print(f"Delivered {sent} Gameplay posts; skipped {len(unseen) - sent} others")
+
           failures = []
 
           for name, feed in FEEDS.items():
               print(f"\nChecking {name}...")
-
               try:
-                  xml_data = request(feed["url"])
-                  item = parse_latest(xml_data)
+                  if name == "reddit_osugame":
+                      check_reddit(name, feed)
+                      continue
 
+                  item = parse_latest(request(feed["url"]))
                   if item is None:
                       print("Feed contains no posts")
                       continue
-
                   guid, title, link = item
-
                   if history.get(name) == guid:
                       print("No new post")
                       continue
-
-                  message = (
-                      f"**New post from {feed['label']}**\n"
-                      f"{title}\n\n{link}"
-                  )
-
-                  request(WEBHOOK, {
-                    "content": f"[r:1829648046925979648] {message}" if name != 'reddit_osugame' else message,
-                    "username": feed["username"],
-                    "avatarUrl": feed["avatar_url"],
-                    "silent": name == "reddit_osugame",
-                })
-
-                  # Only save the ID after successful delivery.
+                  send_post(name, feed, title, link)
                   history[name] = guid
-                  HISTORY_FILE.write_text(
-                      json.dumps(history, indent=2, ensure_ascii=False) + "\n",
-                      encoding="utf-8",
-                  )
-
+                  save_history()
                   print(f"Successfully delivered {name}")
 
               except Exception as exc:
