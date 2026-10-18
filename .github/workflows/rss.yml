@@ -57,7 +57,7 @@ jobs:
                   "avatar_url": "https://pbs.twimg.com/profile_images/1278305103963963393/Y6qHo5ZT_400x400.png",
               },
               "reddit_osugame": {
-                  "url": "https://www.reddit.com/r/osugame/search.xml?q=flair%3A%22Gameplay%22&restrict_sr=1&sort=new&t=all",
+                  "url": "https://www.reddit.com/r/osugame/new/.rss?limit=100",
                   "label": "r/osugame",
                   "username": "r/osugame",
                   "avatar_url": "https://i.redd.it/n13pg82qpjd41.png",
@@ -154,13 +154,35 @@ jobs:
                   "silent": name == "reddit_osugame",
               })
 
+          def looks_like_gameplay(title):
+              # Conservative title-only heuristic; NOT a substitute for actual flair.
+              import re
+              t = title.casefold()
+              # Score posts usually contain a player/beatmap and a score statistic.
+              stats = (
+                  r"\b\d[\d,.]*\s?pp\b",
+                  r"\b\d{2,3}(?:\.\d+)?\s?%",
+                  r"\b\d[\d,]*\s?(?:x|combo)\b",
+                  r"\b(?:fc|ss|s rank|a rank|first pass|new top play|personal best|world record)\b",
+                  r"\b(?:#1|rank\s?#\d+)\b",
+              )
+              score_context = (
+                  r"\b(?:osu!|std|mania|taiko|catch|ctb|score|play|clear|pass|sightread|"
+                  r"replay|leaderboard|map|beatmap|pp|accuracy|acc|combo|fc|dt|hd|hr|ez|fl)\b"
+                  r"|\[[^\]]+\]"
+              )
+              # Strong score signatures or score stats plus relevant context.
+              return bool(
+                  re.search(r"\b\d[\d,.]*\s?pp\b", t)
+                  or (any(re.search(p, t) for p in stats)
+                      and re.search(score_context, t))
+              )
+
           def check_reddit(name, feed):
-              # Reddit's native search feed filters by actual post flair.
-              # Its Atom entries generally do not expose flair metadata.
               root = ET.fromstring(request(feed["url"]))
               atom = "{http://www.w3.org/2005/Atom}"
               if root.tag != atom + "feed":
-                  raise ValueError("Expected Reddit Atom search feed")
+                  raise ValueError("Expected Reddit Atom feed")
 
               posts = []
               for entry in root.findall(atom + "entry"):
@@ -168,50 +190,40 @@ jobs:
                   title = entry.findtext(atom + "title", default="New post")
                   link = next((e.get("href", "") for e in entry.findall(atom + "link")
                                if e.get("rel", "alternate") == "alternate"), "")
-                  if not guid or not link:
-                      continue
-                  posts.append((guid, title, link))
+                  if guid and link:
+                      posts.append((guid, title, link))
 
               if not posts:
-                  print("No Gameplay posts in search feed")
+                  print("No Reddit posts")
                   return
 
-              def normalized_id(value):
-                  # Atom IDs are usually t3_...; handle full URLs too.
-                  import re
-                  match = re.search(r"(t3_[a-z0-9]+)", value or "", re.I)
-                  if match:
-                      return match.group(1).lower()
-                  match = re.search(r"/comments/([a-z0-9]+)", value or "", re.I)
-                  return "t3_" + match.group(1).lower() if match else value
-
               previous = history.get(name)
-              previous_id = normalized_id(previous)
-              # First run with no checkpoint: seed without reposting old entries.
               if not previous:
-                  history[name] = normalized_id(posts[0][0])
+                  history[name] = posts[0][0]
                   save_history()
-                  print("Initialized Gameplay checkpoint; no historical posts sent")
+                  print("Initialized Reddit checkpoint; no historical posts sent")
                   return
 
               unseen = []
               for post in posts:
-                  if normalized_id(post[0]) == previous_id:
+                  if post[0] == previous:
                       break
                   unseen.append(post)
               else:
-                  # The old checkpoint may refer to a non-Gameplay post, or be
-                  # outside the search feed. Seed safely to avoid a flood.
-                  history[name] = normalized_id(posts[0][0])
+                  # Checkpoint may be older than 100 posts. Don't spam a backlog.
+                  history[name] = posts[0][0]
                   save_history()
-                  print("Checkpoint not in Gameplay feed; reseeded without backfill")
+                  print("Previous post outside feed; reset checkpoint without backfill")
                   return
 
+              sent = 0
               for guid, title, link in reversed(unseen):
-                  send_post(name, feed, title, link)
-                  history[name] = normalized_id(guid)
+                  if looks_like_gameplay(title):
+                      send_post(name, feed, title, link)
+                      sent += 1
+                  history[name] = guid
                   save_history()
-              print(f"Delivered {len(unseen)} new Gameplay posts")
+              print(f"Delivered {sent} likely gameplay posts; skipped {len(unseen)-sent} others")
 
           failures = []
 
@@ -245,49 +257,6 @@ jobs:
               )
 
           print("\nAll feeds checked successfully")
-          PY
-
-      - name: Diagnose Reddit Atom metadata (no webhook posts)
-        if: ${{ always() }}
-        run: |
-          python - <<'PY'
-          import urllib.request
-          import urllib.error
-          import xml.etree.ElementTree as ET
-
-          url = "https://www.reddit.com/r/osugame/new/.rss?limit=100"
-          req = urllib.request.Request(url, headers={
-              "User-Agent": "OsuFeedGrabberBot/1.0 (RSS metadata diagnostic)",
-              "Accept": "application/atom+xml, application/xml",
-          })
-          try:
-              with urllib.request.urlopen(req, timeout=20) as response:
-                  print("HTTP status:", response.status)
-                  data = response.read()
-              root = ET.fromstring(data)
-              atom = "{http://www.w3.org/2005/Atom}"
-              entries = root.findall(atom + "entry")
-              print("Atom entries:", len(entries))
-              for entry in entries[:8]:
-                  title = entry.findtext(atom + "title", default="")
-                  guid = entry.findtext(atom + "id", default="")
-                  categories = [e.attrib for e in entry.findall(atom + "category")]
-                  print("Post:", guid, "| title:", title[:100], "| categories:", categories)
-              if entries:
-                  print("First entry child tags:", [e.tag for e in entries[0]])
-              # Inspect HTML content for flair markers, without printing entire posts.
-              import html
-              import re
-              for entry in entries[:30]:
-                  guid = entry.findtext(atom + "id", default="")
-                  raw = entry.findtext(atom + "content", default="")
-                  decoded = html.unescape(raw)
-                  terms = re.findall(r".{0,70}(?:gameplay|flair).{0,100}", decoded, flags=re.I)
-                  print("Content metadata:", guid, "| matches:", [x[:170] for x in terms[:4]])
-              print("NOTE: Content text matches alone do not prove post flair.")
-              print("NOTE: No Nerimity webhook calls in this diagnostic step.")
-          except (urllib.error.URLError, ET.ParseError, TimeoutError) as exc:
-              print("RSS diagnostic unavailable:", type(exc).__name__, str(exc))
           PY
 
       - name: Commit tracking history
