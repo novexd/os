@@ -275,6 +275,16 @@ jobs:
                   print("Post:", guid, "| title:", title[:100], "| categories:", categories)
               if entries:
                   print("First entry child tags:", [e.tag for e in entries[0]])
+              # Inspect HTML content for flair markers, without printing entire posts.
+              import html
+              import re
+              for entry in entries[:30]:
+                  guid = entry.findtext(atom + "id", default="")
+                  raw = entry.findtext(atom + "content", default="")
+                  decoded = html.unescape(raw)
+                  terms = re.findall(r".{0,70}(?:gameplay|flair).{0,100}", decoded, flags=re.I)
+                  print("Content metadata:", guid, "| matches:", [x[:170] for x in terms[:4]])
+              print("NOTE: Content text matches alone do not prove post flair.")
               print("NOTE: No Nerimity webhook calls in this diagnostic step.")
           except (urllib.error.URLError, ET.ParseError, TimeoutError) as exc:
               print("RSS diagnostic unavailable:", type(exc).__name__, str(exc))
